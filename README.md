@@ -1,0 +1,74 @@
+# Fixpoint Review Service（稳定点复核接口）
+
+对有限迁移系统上的模态 μ-演算公式做放行复核：提交位置、初始位置、位置命题、
+带唯一标识的有向迁移与公式，服务以全局不动点迭代求值（μ 从空集、ν 从全集
+迭代至稳定），持久化后返回编号；按编号可读取结论与规范证据（按位置标识排序
+的满足集、每个固定点的全部迭代集合）。
+
+## 公式语法
+
+```
+formula := or
+or      := and ("|" and)*
+and     := unary ("&" unary)*
+unary   := "!" unary | "<>" unary | "[]" unary
+         | "μ" VAR "." formula | "ν" VAR "." formula      （绑定域尽量向右延伸）
+         | "(" formula ")" | PROP | VAR
+```
+
+- 命题为小写开头的标识符，变量为大写开头的标识符；变量引用最近绑定者。
+- 良构性强制：变量必须受模态算子（`<>`/`[]`）守卫；不得出现未绑定变量、
+  重复绑定名、否定出现的变量（保证单调可终止）；整个输入必须被消费（无语法残留）。
+
+## 提交规则
+
+- 位置：2–24 个唯一标识；初始位置必须在其中。
+- 迁移：有向、标识唯一，源/目标必须是已声明位置（悬空迁移拒绝）。
+- 位置命题：不得引用未声明位置。
+- 任何违规返回 `422` 且不生成可读取编号。
+
+## API
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/reviews` | 创建复核，201 返回 `{"id", "result"}` |
+| GET | `/reviews/{id}` | 读取结论与证据（`spec` + `result`，含 `iterations`） |
+| GET | `/health` | 健康检查 |
+
+示例：
+
+```bash
+curl -s -X POST http://localhost:8080/reviews -H 'Content-Type: application/json' -d '{
+  "locations": ["s1", "s2"],
+  "initial": "s1",
+  "propositions": {"s1": ["safe"], "s2": ["safe"]},
+  "transitions": [
+    {"id": "t1", "source": "s1", "target": "s1"},
+    {"id": "t2", "source": "s1", "target": "s2"},
+    {"id": "t3", "source": "s2", "target": "s2"}
+  ],
+  "formula": "νX.(safe & []X)"
+}'
+```
+
+## 运行
+
+```bash
+# Docker Compose（应用 + 一次性验收）
+docker compose up --exit-code-from verify --abort-on-container-exit
+echo $?   # 0 = 验收通过
+
+# 仅启动服务（端口可配置）
+APP_PORT=9090 PORT=8000 docker compose up app
+
+# 本地开发
+pip install -r requirements.txt
+PORT=8000 DATA_DIR=./data uvicorn app.main:app --host 0.0.0.0 --port 8000
+pytest tests -q
+```
+
+- `PORT`：容器内监听端口（默认 8000）；`APP_PORT`：宿主机映射端口（默认 8080）。
+- 数据持久化于 `DATA_DIR`（Compose 下为命名卷 `review-data`）。
+- `verify` 服务依次执行：μ 扩展 / ν 收敛单元测试、构建检查（编译与导入）、
+  HTTP 冒烟（安全自循环 ν 满足、μ 可达性扩展到初始位置、危险迁移使 ν 不满足、
+  非法提交拒绝且无编号、未知编号 404），单次验收结束即退出并以退出码报告。

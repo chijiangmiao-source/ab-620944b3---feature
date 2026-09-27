@@ -7,6 +7,17 @@ POST /reviews  — submit a review (locations, initial location, location
 GET  /reviews/{id} — read back the conclusion and the normative
                  evidence (sorted satisfaction set, every fixpoint
                  iteration set).
+POST /reviews/{id}/audits — launch a stable-point dependency-evidence
+                 audit against a persisted review.  The source procedure
+                 and conclusion are frozen, re-evaluated for consistency,
+                 and a position-indexed proof graph is built and
+                 independently verified before a new audit id is issued.
+                 A missing source yields 404; a freeze/recompute
+                 mismatch yields 409; evidence that cannot close is
+                 never persisted.
+GET  /audits/{id} — read back the frozen bundle and the directed proof
+                 graph after re-running the independent verification;
+                 evidence that no longer closes is not served (409).
 GET  /health   — liveness probe.
 """
 from __future__ import annotations
@@ -16,7 +27,9 @@ import os
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from .audit import AuditError, AuditFreezeError, produce_audit, reverify_audit
 from .checker import Model, evaluate, state_sort_key
+from .evidence import EvidenceError
 from .formula import FormulaError, parse
 from .store import ReviewStore
 
@@ -129,6 +142,44 @@ def create_app(store: ReviewStore) -> FastAPI:
         record = store.get(review_id)
         if record is None:
             raise HTTPException(status_code=404, detail="review not found")
+        return record
+
+    @app.post("/reviews/{review_id}/audits", status_code=201)
+    def create_audit(review_id: str):
+        record = store.get(review_id)
+        if record is None:
+            # The source review does not exist: no audit is persisted.
+            raise HTTPException(status_code=404, detail="review not found")
+        try:
+            bundle = produce_audit(record)
+        except AuditFreezeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        except (AuditError, EvidenceError, FormulaError, KeyError, TypeError,
+                ValueError) as exc:
+            # Evidence could not be closed (including a tampered frozen
+            # source): nothing readable is written.
+            raise HTTPException(status_code=500, detail=str(exc))
+        audit_id = store.save_audit(review_id, bundle)
+        return {
+            "id": audit_id,
+            "review_id": review_id,
+            "conclusion": bundle["conclusion"],
+            "polarity": bundle["polarity"],
+        }
+
+    @app.get("/audits/{audit_id}")
+    def get_audit(audit_id: str):
+        record = store.get_audit(audit_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="audit not found")
+        try:
+            reverify_audit(record)
+        except (EvidenceError, KeyError, TypeError) as exc:
+            # Stored evidence no longer closes under independent
+            # verification: it is not served as a readable audit.
+            raise HTTPException(
+                status_code=409, detail=f"audit evidence does not verify: {exc}"
+            )
         return record
 
     return app

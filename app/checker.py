@@ -26,6 +26,7 @@ class Model:
     states: tuple[str, ...]
     props: dict[str, frozenset]
     succ: dict[str, frozenset]
+    edges: dict[str, tuple]
 
     @classmethod
     def from_spec(cls, locations, propositions, transitions):
@@ -36,12 +37,15 @@ class Model:
         states = tuple(sorted(locations, key=state_sort_key))
         props = {s: frozenset(propositions.get(s, ())) for s in states}
         nxt = {s: set() for s in states}
-        for _tid, src, dst in transitions:
+        edges = {s: [] for s in states}
+        for tid, src, dst in transitions:
             nxt[src].add(dst)
+            edges[src].append((tid, dst))
         return cls(
             states=states,
             props=props,
             succ={s: frozenset(targets) for s, targets in nxt.items()},
+            edges={s: tuple(sorted(ts)) for s, ts in edges.items()},
         )
 
 

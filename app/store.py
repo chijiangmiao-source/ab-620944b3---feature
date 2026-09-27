@@ -1,4 +1,4 @@
-"""SQLite-backed persistence for review records."""
+"""SQLite-backed persistence for review records and evidence audits."""
 from __future__ import annotations
 
 import json
@@ -17,6 +17,13 @@ class ReviewStore:
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS reviews ("
             " id TEXT PRIMARY KEY,"
+            " created_at TEXT NOT NULL,"
+            " payload TEXT NOT NULL)"
+        )
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS audits ("
+            " id TEXT PRIMARY KEY,"
+            " review_id TEXT NOT NULL,"
             " created_at TEXT NOT NULL,"
             " payload TEXT NOT NULL)"
         )
@@ -43,6 +50,34 @@ class ReviewStore:
             return None
         record = json.loads(row[2])
         return {"id": row[0], "created_at": row[1], **record}
+
+    def save_audit(self, review_id: str, record: dict) -> str:
+        audit_id = uuid.uuid4().hex
+        created_at = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO audits (id, review_id, created_at, payload)"
+                " VALUES (?, ?, ?, ?)",
+                (audit_id, review_id, created_at, json.dumps(record, ensure_ascii=False)),
+            )
+            self._conn.commit()
+        return audit_id
+
+    def get_audit(self, audit_id: str):
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id, review_id, created_at, payload FROM audits WHERE id = ?",
+                (audit_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        record = json.loads(row[3])
+        return {
+            "id": row[0],
+            "review_id": row[1],
+            "created_at": row[2],
+            **record,
+        }
 
     def close(self) -> None:
         self._conn.close()

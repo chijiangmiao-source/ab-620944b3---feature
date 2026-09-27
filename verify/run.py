@@ -208,6 +208,124 @@ def smoke_unknown_review_id_is_404():
     http("GET", "/reviews/" + "0" * 32, expect=404)
 
 
+# --- stable-point dependency-evidence audits ------------------------------
+
+
+def _create_review(body):
+    return http("POST", "/reviews", body, expect=201)
+
+
+@step
+def smoke_audit_nu_self_loop_folds_at_stable_approximant():
+    body = {
+        "locations": ["s1", "s2"],
+        "initial": "s1",
+        "propositions": {"s1": ["safe"], "s2": ["safe"]},
+        "transitions": [
+            {"id": "t1", "source": "s1", "target": "s1"},
+            {"id": "t2", "source": "s1", "target": "s2"},
+            {"id": "t3", "source": "s2", "target": "s2"},
+        ],
+        "formula": SAFETY_FORMULA,
+    }
+    review = _create_review(body)
+    audit = http("POST", f"/reviews/{review['id']}/audits", expect=201)
+    assert audit["review_id"] == review["id"]
+    assert audit["polarity"] == "+", audit
+    assert audit["conclusion"]["initial_satisfied"] is True
+
+    fetched = http("GET", f"/audits/{audit['id']}", expect=200)
+    assert fetched["frozen"]["spec"]["formula"] == SAFETY_FORMULA
+    assert fetched["frozen"]["result"]["satisfaction_set"] == ["s1", "s2"]
+    assert [p["kind"] for p in fetched["positions"]] == [
+        "nu", "and", "prop", "box", "var",
+    ]
+    proof = fetched["proof"]
+    nodes = {n["id"]: n for n in proof["nodes"]}
+    folds = [e for e in proof["edges"] if e.get("fold")]
+    assert folds, "guarded ν self-loop must close via a fold edge"
+    for e in folds:
+        tgt = nodes[e["target"]]
+        assert tgt["type"] == "approx" and tgt["op"] == "nu", tgt
+        assert (tgt["round"], tgt["step"]) == (1, 1), tgt  # stable approximant
+    root = nodes[proof["root"]]
+    assert root["state"] == "s1" and root["polarity"] == "+"
+    # re-reading re-verifies and returns the identical bundle
+    again = http("GET", f"/audits/{audit['id']}", expect=200)
+    assert again == fetched
+
+
+@step
+def smoke_audit_mu_reachability_unfolds_strictly_earlier():
+    body = {
+        "locations": ["s1", "s2", "s3"],
+        "initial": "s1",
+        "propositions": {"s3": ["goal"]},
+        "transitions": [
+            {"id": "a", "source": "s1", "target": "s2"},
+            {"id": "b", "source": "s2", "target": "s3"},
+            {"id": "c", "source": "s3", "target": "s3"},
+        ],
+        "formula": REACH_FORMULA,
+    }
+    review = _create_review(body)
+    audit = http("POST", f"/reviews/{review['id']}/audits", expect=201)
+    assert audit["polarity"] == "+"
+    fetched = http("GET", f"/audits/{audit['id']}", expect=200)
+    proof = fetched["proof"]
+    assert not [e for e in proof["edges"] if e.get("fold")]
+    nodes = {n["id"]: n for n in proof["nodes"]}
+    stable = {(b, r): s for b, r, s in fetched["facts"]["stable"]}
+    by_cid = {c["cid"]: c for c in fetched["facts"]["contexts"]}
+    for n in proof["nodes"]:
+        if n["type"] != "var":
+            continue
+        (edge,) = [e for e in proof["edges"] if e["source"] == n["id"]]
+        tgt = nodes[edge["target"]]
+        bound = next(
+            e for e in reversed(by_cid[n["cid"]]["frame"]) if e[0] == tgt["pos"]
+        )
+        assert tgt["step"] == bound[2], (n, tgt)
+        assert tgt["step"] < stable[(tgt["pos"], tgt["round"])]
+
+
+@step
+def smoke_audit_dangerous_transition_rejection_proof():
+    body = {
+        "locations": ["s1", "s2", "s3"],
+        "initial": "s1",
+        "propositions": {"s1": ["safe"], "s2": ["safe"]},
+        "transitions": [
+            {"id": "t1", "source": "s1", "target": "s2"},
+            {"id": "t2", "source": "s2", "target": "s2"},
+            {"id": "t3", "source": "s1", "target": "s3"},  # danger: s3 not safe
+            {"id": "t4", "source": "s3", "target": "s3"},
+        ],
+        "formula": SAFETY_FORMULA,
+    }
+    review = _create_review(body)
+    assert review["result"]["initial_satisfied"] is False
+    audit = http("POST", f"/reviews/{review['id']}/audits", expect=201)
+    assert audit["polarity"] == "-", audit
+    assert audit["conclusion"]["initial_satisfied"] is False
+    fetched = http("GET", f"/audits/{audit['id']}", expect=200)
+    proof = fetched["proof"]
+    assert not [e for e in proof["edges"] if e.get("fold")]
+    nodes = {n["id"]: n for n in proof["nodes"]}
+    root = nodes[proof["root"]]
+    assert root["polarity"] == "-" and root["state"] == "s1"
+    # the refutation cites the dangerous transition
+    box = next(n for n in proof["nodes"] if n["type"] == "box")
+    (edge,) = [e for e in proof["edges"] if e["source"] == box["id"]]
+    assert edge["transition"] == "t3", edge
+
+
+@step
+def smoke_audit_missing_source_and_unknown_audit_are_404():
+    http("POST", "/reviews/" + "0" * 32 + "/audits", expect=404)
+    http("GET", "/audits/" + "0" * 32, expect=404)
+
+
 def main() -> int:
     print(f"acceptance target: {APP_URL}", flush=True)
     for fn in STEPS:
